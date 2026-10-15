@@ -14652,6 +14652,9 @@ function _mkPopularComboFreqHtml(type, combo, rankMap){
         }
       });
 
+      // 軸馬候補などの補助パネルも、取得済みの単勝を認識できるようにする。
+      // 値・取得先・反映方法は従来のままで、成功時刻のみ記録。
+      if(tan.size > 0) race._liveOddsAt = Date.now();
       (race.horses || []).forEach(h => {
         const n = Number(h.num);
         if(tan.has(n)) h.odds = tan.get(n);
@@ -34205,85 +34208,58 @@ function getAxisRanks(rid) {
 }
 
 async function fetchAxisMix(rid) {
-  const gas = String(MUKETSU_GAS_URL || '').trim();
+  /* NAR版：軸馬候補も本体と同じ正常動作中の地方オッズ取得結果を使う。
+     旧GAS /api/gas.php や netkeiba race_id は一切呼ばない。
+     iPhone の file:// / 外部スクリプト制限下で旧APIを余計に開かないための修正。 */
+  const race = racesData && racesData[rid];
+  if (!race) throw new Error('対象レースが見つかりません');
 
-  if (!gas) {
-    throw new Error('オッズ取得先が未設定です');
-  }
+  const stored = type => String(
+    (window._mkOddsText || {})[_mkOddsKey(rid, type)] || ''
+  ).trim();
 
-  const netId = await _resolveNetkeibaRaceId(rid);
-
-  if (!netId) {
-    throw new Error('レースIDを取得できません');
+  // 既に本体で単勝と組合せオッズを受信している場合は通信を増やさない。
+  if (!(Number(race._liveOddsAt) > 0) || !stored('馬連') || !stored('3連複')) {
+    const odds = await _narDirectGet();  // 既存の成功済み NAR JS 取得関数
+    _narDirectApply(rid, odds);           // 既存のオッズ反映処理
   }
 
   const specs = [
-    {code:4, count:2},
-    {code:7, count:3}
+    { type:'馬連', size:2 },
+    { type:'3連複', size:3 }
   ];
-
-  const results = await Promise.all(specs.map(async spec => {
-    const url = gas +
-      '?action=odds&race_id=' +
-      encodeURIComponent(netId) +
-      '&type=' + spec.code;
-
-    const data = await callGAS(url);
-
-    if (!data || !data.ok || !Array.isArray(data.lines)) {
-      throw new Error(
-        data?.error || 'ミックスオッズ取得失敗'
-      );
-    }
-
+  const results = specs.map(spec => {
     const found = new Map();
-
-    data.lines.forEach(item => {
-      const odds = Number(
-        String(item.odds ?? '').replace(/,/g, '')
-      );
-
-      const nums = (
-        String(item.combo || '').match(/\d+/g) || []
-      ).map(Number);
-
+    stored(spec.type).split(/\r?\n/).forEach(line => {
+      if (!line.trim()) return;
+      const cells = line.split('\t');
+      const odds = Number(String(cells[1] || '').replace(/,/g, ''));
+      const nums = (String(cells[0] || '').match(/\d+/g) || []).map(Number);
       if (!Number.isFinite(odds) || odds <= 0 ||
-          nums.length !== spec.count ||
-          new Set(nums).size !== spec.count ||
-          nums.some(n => !Number.isInteger(n) || n < 1 || n > 18)) {
-        return;
-      }
-
-      const combo = nums.sort((a,b) => a-b).join('-');
-      const old = found.get(combo);
-
-      if (old === undefined || odds < old) {
-        found.set(combo, odds);
-      }
+          nums.length !== spec.size ||
+          new Set(nums).size !== spec.size ||
+          nums.some(n => !Number.isInteger(n) || n < 1 || n > 18)) return;
+      nums.sort((a,b) => a-b);
+      const combo = nums.join('-');
+      const prev = found.get(combo);
+      if (prev === undefined || odds < prev) found.set(combo, odds);
     });
-
-    const rows = [...found]
-      .map(([combo,odds]) => ({combo,odds}))
-      .sort((a,b) =>
-        a.odds - b.odds ||
-        a.combo.localeCompare(b.combo, 'ja', {numeric:true})
-      )
+    const rows = Array.from(found, ([combo,odds]) => ({combo,odds}))
+      .sort((a,b) => a.odds - b.odds ||
+            a.combo.localeCompare(b.combo, 'ja', { numeric:true }))
       .slice(0,10);
-
     return {rows};
-  }));
+  });
+
+  if (results.some(result => result.rows.length < 10)) {
+    throw new Error('軸馬判定用の馬連・3連複オッズがまだ揃っていません');
+  }
 
   axisMixCache[rid] = {
     rid,
-    hhmm: new Date().toLocaleTimeString(
-      'ja-JP',
-      {hour:'2-digit', minute:'2-digit'}
-    ),
-    results: [
-      {rows:[]},
-      results[0],
-      results[1]
-    ]
+    hhmm: new Date().toLocaleTimeString('ja-JP',
+      {hour:'2-digit', minute:'2-digit'}),
+    results: [{rows:[]}, results[0], results[1]]
   };
 }
 
@@ -34470,6 +34446,14 @@ if (axisMixPending.has(axisRid)) {
     main.appendChild(oddsLabel);
   }
 
+  // 既に出馬表で持っている指数を併記。新しい評価値は生成しない。
+  const score = horse ? Number(horse.shisu) : NaN;
+  if (Number.isFinite(score) && score > 0) {
+    const scoreLabel = node('span', '', '指数 ' + score.toFixed(0));
+    scoreLabel.style.cssText =
+      'font-size:11px;font-weight:800;color:#304da4;white-space:nowrap;';
+    main.appendChild(scoreLabel);
+  }
   main.appendChild(meta);
   main.appendChild(badge);
 
